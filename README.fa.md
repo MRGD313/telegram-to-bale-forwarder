@@ -4,6 +4,9 @@
  </a>
 </p>
 
+> ⚠️ **Outdated** — This Persian README is no longer maintained.  
+> Please use the full and up-to-date guide in [README.md](./README.md).
+
 # 🤖 ربات انتقال محتوا از تلگرام به بله
 
 رباتی تمام‌اتوماتیک با پایتون که پیام‌های دریافتی از کانال‌های مشخص تلگرام (متن، عکس، ویدیو و فایل‌ها) را به کانال پیام رسان بله شما از طریق API ربات بله ارسال می‌کند.

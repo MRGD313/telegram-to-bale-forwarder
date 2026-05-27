@@ -1,3 +1,5 @@
 telethon>=1.30.0,<2.0.0
+PySocks>=1.7.0,<2.0.0
 requests>=2.25.0,<3.0.0
 python-dotenv>=1.0.0,<2.0.0
+imageio-ffmpeg>=0.5.0,<1.0.0

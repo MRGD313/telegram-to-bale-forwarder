@@ -1,154 +1,275 @@
-<p align="center">
- <a href="./README.fa.md">
- فارسی
- </a>
-</p>
+# Telegram → Bale Forwarder
 
-# 🤖 Telegram to Bale Forwarder Bot
+Forward messages from **Telegram channels or forum groups** to **Bale** channels with strict chronological order, album support, media compression for slow networks, and unattended daemon operation.
 
-A fully automated Python bot that listens to specific Telegram channels and forwards all messages (text, photos, videos, and documents) to your **Bale messenger** channel using the Bale Bot API.
+Supports:
 
----
+- **Public channel** → one Bale channel (full history + live)
+- **Private forum group** → different Bale channel per topic (mapped topics only)
+- **SQLite queue** — resume after restarts without re-sending
+- **Strict order** — message *N+1* is not sent until *N* succeeds
+- **Auto-reconnect** — Telegram disconnects are retried (daemon supervisor)
 
-## 🚀 Features
-
-- ✅ Forward **text messages**
-- 🖼 Forward **images** via Bale's `sendPhoto`
-- 📹 Forward **videos** via Bale's `sendVideo`
-- 📄 Forward **documents** as-is
-- 🔁 Retry sending files up to 3 times on failure
-- 🖼 Generate preview image for failed video uploads using `ffmpeg`
-- ⚙️ Automatically detects file type and selects correct Bale API method
-- 📡 systemd service integration for auto-start
-- 🧰 Command-line control tool (`teltobale`)
+Uses [Telethon](https://github.com/LonamiWebs/Telethon) (user account) + [Bale Bot API](https://docs.bale.ai).
 
 ---
 
-## 🔑 What You’ll Need
+## Features
 
-To use this bot, you’ll need a few keys and IDs. Here’s what they are and how to get them:
-
-| Name | Description | How to Get It |
-|------|-------------|---------------|
-| **API ID** | Your Telegram app's API ID | Create a Telegram app at [my.telegram.org](https://my.telegram.org/auth) and you’ll receive an API ID. |
-| **API Hash** | Your Telegram app's secret hash | Comes with the API ID above on Telegram's developer portal. |
-| **Phone Number** | Your phone number used to log in to Telegram | Enter it in international format (e.g., +989123456789). |
-| **Bale Bot Token** | Token for your bot on Bale Messenger | Create a bot at [tapi.bale.ai](https://tapi.bale.ai), and get your bot token (starts with `bot...`). |
-| **Bale Channel's Chat ID** | Numeric ID of your **Bale channel** | Add the bot as an admin, send a message in your Bale channel, then call: `https://tapi.bale.ai/bot<YourToken>/getUpdates` and copy the numeric `chat_id`. |
-| **Telegram Channels** | Telegram channel usernames to monitor | Example: `@newsch1,@mediahub2` (you must be a member). |
-
-> ⚠️ Be sure to add your Bale bot as **admin** in your Bale channel.
+| Area | Behavior |
+|------|----------|
+| Text | Plain / HTML / markdown options; optional Telegram deep-link fallback |
+| Photos | Albums → Bale `sendMediaGroup`; single images as document or photo |
+| Voice / audio | Opus re-encode ladder; compress-before-upload on slow links |
+| Video | H.264 resize + CRF; tiered upload → compress → link fallback |
+| Forum topics | `TOPIC_TO_BALE_MAPPING` per topic; unlisted topics skipped |
+| Order | `STRICT_SEND_ORDER=1`; auto-retry same message on failure |
+| Daemon | Crawl history → send queue → listen for new Telegram posts |
 
 ---
 
-## 📦 Requirements
+## Requirements
 
-- Python 3.7+
-- Debian/Ubuntu Linux (recommended)
-- `ffmpeg` installed
-- Internet access (for both Telegram and Bale)
+- Python **3.10+**
+- **ffmpeg** on `PATH`, or bundled via `pip install imageio-ffmpeg` (see `FFMPEG_PATH`)
+- Telegram account (API ID/hash from [my.telegram.org](https://my.telegram.org))
+- Bale bot token from [tapi.bale.ai](https://tapi.bale.ai) — bot must be **admin** in destination channels
 
----
+### Network (Iran, v2rayN, Clash) — automatic
 
-## ⚙️ Quick Install
+**No configuration required by default.** On startup the forwarder:
 
-Just run this single line:
+1. Tries a **direct** connection to Telegram (works with TUN/global VPN).
+2. If that fails, reads **Windows system proxy** (v2rayN “System Proxy”).
+3. Scans common **local ports** (`10808`, `7890`, …) and uses the first proxy that reaches Telegram.
+4. Sets **HTTP_PROXY** (Bale) and **Telethon proxy** (Telegram MTProto) for you.
 
-```
-bash <(curl -Ls https://raw.githubusercontent.com/ach1992/telegram-to-bale/main/install.sh)
-```
+You should see one of:
 
-## This will:
+- `[Network] auto: direct Telegram OK …`
+- `[Network] auto-detected local proxy …`
+- `[Network] using Windows system proxy …`
 
-- Clone the project
-- Install all dependencies
-- Ask for your Telegram/Bale credentials
-- Create a Telegram session
-- Create and run systemd service
-- Register teltobale CLI tool
+Optional overrides (only if auto-detect is wrong):
 
----
+| Variable | Values |
+|----------|--------|
+| `NETWORK_MODE` | `auto` (default), `direct`, `proxy` |
+| `TUN_MODE` | legacy alias: `on` = direct, `off` = proxy only |
+| `LOCAL_HTTP_PROXY` | force a specific URL (tried first) |
+| `TELEGRAM_PROXY_URL` | e.g. `socks5://127.0.0.1:10808` |
+| `NETWORK_TELETHON_PROBE` | `1` on Windows by default: real MTProto test before use (not just TCP) |
 
-## 🔁 Running the Bot
-
-After install, the bot will run in the background automatically.
-To check or control the bot:
-
-```
-sudo systemctl status tg2bale.service
-sudo systemctl restart tg2bale.service
-```
+**Windows + v2rayN:** If logs showed `WinError 121` while v2rayN was running, that was Python’s default `ProactorEventLoop` breaking proxied Telethon sockets. The forwarder now switches to `WindowsSelectorEventLoopPolicy` automatically.
 
 ---
 
-## 💻 CLI Tool: teltobale
-A global command is created:
+## Quick start
 
-```
-teltobale status     # Check bot status
-teltobale restart    # Restart the bot
-teltobale stop       # Stop the bot
-teltobale uninstall  # Uninstall the bot
-```
+### 1. Clone and install
 
----
-
-## 🧪 Developer Setup
-
-```
-git clone https://github.com/ach1992/telegram-to-bale.git
-cd telegram-to-bale
-python3 -m venv .venv
-source .venv/bin/activate
+```bash
+git clone <your-repo-url>
+cd telegram-to-bale-forwarder
+python -m venv .venv
+# Windows:  .venv\Scripts\activate
+# Linux:   source .venv/bin/activate
 pip install -r requirements.txt
-python setup.py
+```
+
+### 2. Configure credentials
+
+Copy an example env file and edit secrets (never commit these):
+
+```bash
+# Public channel → one Bale channel
+cp .env.public.example .env.public
+
+# OR forum group → per-topic Bale channels
+cp .env.private.example .env.private
+```
+
+Required in every profile:
+
+```env
+API_ID=
+API_HASH=
+BALE_BOT_TOKEN=
+TELEGRAM_PHONE=+98...
+```
+
+### 3. Public channel
+
+`.env.public`:
+
+```env
+SOURCE_TO_BALE_MAPPING=@YourTelegramChannel->@YourBaleChannel
+MODE=daemon
+BACKFILL_LIMIT=0
+DAEMON_INITIAL_CRAWL=1
+DB_PATH=state.db
+SEND_TOPIC_BY_TOPIC=0
+STRICT_SEND_ORDER=1
+RESET_SENT_ON_SEND_START=0
+```
+
+Run:
+
+```powershell
+# Windows
+.\run_public.ps1
+
+# Linux / manual
+DOTENV_FILE=.env.public python main.py
+```
+
+### 4. Private forum (per-topic Bale channels)
+
+**Step A — list topic IDs and names:**
+
+```powershell
+$env:DOTENV_FILE = ".env.private"
+python scripts/list_forum_topics.py
+```
+
+**Step B — map topics** in `.env.private`:
+
+```env
+SOURCE_TO_BALE_MAPPING=https://t.me/+YourInviteHash->@fallback_bale
+STRICT_TOPIC_ROUTING_SOURCES=https://t.me/+YourInviteHash
+TOPIC_TO_BALE_MAPPING=2->@topic_a;4->@topic_b;6->@topic_c
+INCLUDE_SEND_TOPIC_IDS=2,4,6
+EXCLUDE_SEND_TOPIC_IDS=1
+DB_PATH=state_private.db
+```
+
+Use the **exact** Bale `@username` from channel settings (case-sensitive). Verify:
+
+```powershell
+python scripts/verify_bale_channels.py
+```
+
+Run:
+
+```powershell
+.\run_private.ps1
 ```
 
 ---
 
-## 🧼 Uninstall
+## Modes
 
-```
-teltobale uninstall
-```
+| `MODE` | Description |
+|--------|-------------|
+| `daemon` | **Recommended.** Optional crawl + send queue + live listener |
+| `crawl` | Only enqueue messages into SQLite |
+| `send` | Only drain the queue |
+| `crawl_then_send` | One-shot crawl then send (no live) |
+| `discover_topics` | Print forum `topic_id` + message counts |
 
 ---
 
-## 📁 Project Structure
+## Two profiles (do not mix queues)
+
+Run **public** and **private** with separate env files and databases:
+
+| Profile | Env file | DB | Launch |
+|---------|----------|-----|--------|
+| Public | `.env.public` | `state.db` | `run_public.ps1` |
+| Private forum | `.env.private` | `state_private.db` | `run_private.ps1` |
+
+Only one forwarder process at a time (shared `session` file).
+
+---
+
+## Fresh start vs resume
+
+| Goal | Action |
+|------|--------|
+| **Resume** | Keep `state*.db`, `RESET_SENT_ON_SEND_START=0`, restart |
+| **From first** | Delete `state*.db` (+ `-wal`/`-shm`), restart |
+
+---
+
+## Media pipeline (slow networks)
+
+Defaults favor smaller uploads (e.g. Iran → Bale):
+
+1. Optional **compress before upload** (`COMPRESS_SMALL_FIRST=1`)
+2. Upload to Bale (retries + backoff on 5xx)
+3. On failure → **ffmpeg** compress and retry
+4. On failure → text + **t.me** link (`BALE_FALLBACK_TELEGRAM_LINK=1`)
+
+Tune via `.env.example` (bitrates, CRF, size thresholds).
+
+---
+
+## Telegram resilience
+
+On disconnect, the daemon reconnects and continues (no manual restart):
+
+- `DAEMON_SUPERVISOR=1`
+- `TELEGRAM_RECOVER_DELAY_SECONDS=15`
+- `TELEGRAM_OP_MAX_RETRIES=8`
+
+---
+
+## Project layout
 
 ```
-├── main.py               # Bot logic
-├── cli.py                # CLI tool
-├── setup.py              # Setup wizard
-├── setup.sh              # Full auto installer
-├── install.sh            # Curl-based bootstrap
-├── uninstall.sh          # Full cleanup
+├── main.py                 # Forwarder core
+├── cli.py                  # Optional CLI helper
+├── setup.py                # Interactive .env wizard
+├── run_public.ps1          # Public profile (Windows)
+├── run_private.ps1         # Private profile (Windows)
+├── .env.example            # All options documented
+├── .env.public.example
+├── .env.private.example
+├── scripts/                # Topics list, Bale verify, E2E tests
 ├── requirements.txt
-├── .env                  # Credentials file (auto-generated)
-├── temp/                 # Temp folder for media
+└── LICENSE
 ```
 
 ---
 
-## ❗ Troubleshooting
+## Testing
 
-### Media not sending?
-- Ensure proper file extensions, and that ffmpeg is installed.
+See `scripts/TEST_PLAN.md` and:
 
-### 401/403 errors from Bale?
-- Your bot may not be added to the channel as admin, or token is wrong.
-
-### Telegram login fails?
-- Make sure your server is not blocked by Telegram.
+```powershell
+py scripts/generate_test_env.py
+.\scripts\run_e2e_from_zero.ps1
+```
 
 ---
 
-## 📃 License
+## Troubleshooting
 
-MIT License © 2025 ach1992
+| Problem | Check |
+|---------|--------|
+| Bale `404 no such group or user` | Exact `@username` from Bale; bot is channel admin |
+| Stuck on one message | `forwarder_*.log`; strict order waits for that message |
+| `database is locked` | Only one process using `session` |
+| ffmpeg / Opus errors | Set `FFMPEG_PATH` or `pip install imageio-ffmpeg` |
+| Wrong send order (public) | `SEND_TOPIC_BY_TOPIC=0` for channels |
 
 ---
 
-## ⭐ Star History
+## Publishing to GitHub
 
-[![Stargazers over time](https://starchart.cc/ach1992/telegram-to-bale.svg)](https://starchart.cc/ach1992/telegram-to-bale)
+1. Run `.\scripts\pre_publish_check.ps1` (or review `git status` manually).
+2. Confirm `.gitignore` excludes `.env*`, `session*`, `*.db`, `temp/`, logs.
+3. Do **not** commit credentials or `state.db`.
+4. See [docs/OPEN_SOURCE_PLAN.md](docs/OPEN_SOURCE_PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+> **Deprecated (do not use):** `install.sh`, `setup.sh`, `cli.py` — old single-channel install. Use `run_public.ps1` or `run_private.ps1` instead.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+<p align="right"><a href="./README.fa.md">فارسی</a></p>

@@ -1,3 +1,36 @@
+# Secrets and runtime
 .env
-__pycache__/
+.env.*
+!.env.example
+!.env.*.example
+.env.test.*
 session*
+*.session
+
+# Queue and local state
+*.db
+*.db-shm
+*.db-wal
+*.db.backup_*
+
+# Media and tools
+temp/
+tools/ffmpeg.zip
+tools/ffmpeg-*/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs and local test output
+*.log
+forwarder_*.log
+test_log_*.txt
+test_e2e_run.log
+topics_*.txt
+
+# OS
+.DS_Store
+Thumbs.db
