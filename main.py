@@ -471,6 +471,11 @@ upload_audio_sec_per_mb = float(os.getenv("UPLOAD_AUDIO_SEC_PER_MB", "90"))
 upload_audio_read_max_seconds = float(os.getenv("UPLOAD_AUDIO_READ_MAX_SECONDS", "1200"))
 # 0 = never metadata link-only for audio; large voices still download+compress+upload.
 upload_audio_max_link_only_mb = float(os.getenv("UPLOAD_AUDIO_MAX_LINK_ONLY_MB", "0"))
+# For huge non-video files, skip brittle upload chain and post Telegram link directly.
+upload_image_max_link_only_mb = float(os.getenv("UPLOAD_IMAGE_MAX_LINK_ONLY_MB", "20"))
+upload_other_max_link_only_mb = float(os.getenv("UPLOAD_OTHER_MAX_LINK_ONLY_MB", "35"))
+# Images above this size skip sendPhoto path and use sendDocument-only attempts.
+upload_image_document_only_mb = float(os.getenv("UPLOAD_IMAGE_DOCUMENT_ONLY_MB", "3"))
 # Comma-separated buckets allowed to use t.me link fallback: default video only (not text/image/voice).
 _bale_link_buckets_raw = os.getenv("BALE_FALLBACK_TELEGRAM_LINK_BUCKETS", "video").strip().lower()
 BALE_FALLBACK_TELEGRAM_LINK_BUCKETS = frozenset(
@@ -534,6 +539,18 @@ bale_document_album_media_group = os.getenv("BALE_DOCUMENT_ALBUM_MEDIA_GROUP", "
     "1",
     "true",
     "yes",
+)
+# Large homogeneous albums are more likely to fail with SSL EOF on one huge multipart POST.
+# If estimated total source size is above these limits, skip sendMediaGroup and upload parts sequentially.
+bale_photo_album_media_group_max_total_mb = float(
+    os.getenv("BALE_PHOTO_ALBUM_MEDIA_GROUP_MAX_TOTAL_MB", "24")
+)
+bale_document_album_media_group_max_total_mb = float(
+    os.getenv("BALE_DOCUMENT_ALBUM_MEDIA_GROUP_MAX_TOTAL_MB", "32")
+)
+# Extra guard for very large single files inside album chunks.
+bale_document_album_media_group_max_file_mb = float(
+    os.getenv("BALE_DOCUMENT_ALBUM_MEDIA_GROUP_MAX_FILE_MB", "20")
 )
 # sendMediaGroup TCP connect timeout (seconds). Large multipart document uploads often need 60–120+.
 bale_media_group_connect_seconds = float(os.getenv("BALE_MEDIA_GROUP_CONNECT_SECONDS", "90"))
@@ -1043,7 +1060,12 @@ def _bale_request_kwargs():
     """Force direct connection to Bale unless BALE_USE_PROXY=1."""
     if bale_use_proxy:
         return {}
-    return {"proxies": {"http": None, "https": None}}
+    # `requests` may still consult environment/session state; force no proxy and close each connection.
+    # This avoids flaky TLS EOFs seen when system proxy is active for Telegram but Bale must go direct.
+    return {
+        "proxies": {"http": "", "https": ""},
+        "headers": {"Connection": "close"},
+    }
 
 
 def safe_remove(path):
@@ -1612,7 +1634,9 @@ def upload_media_bucket_from_message(msg_kind, ext):
     mk = str(msg_kind).lower() if msg_kind else ""
     if "voice" in mk or "audio" in mk or ext_l in AUDIO_EXTENSIONS or ext_l in (".oga", ".opus"):
         return "audio"
-    return None
+    # Treat any other downloadable file (pdf/doc/zip/...) as "other" so confidence gates
+    # can skip expensive download/upload and jump directly to Telegram-link fallback.
+    return "other"
 
 
 def upload_tier_plan_from_bucket_mb(bucket, mb):
@@ -1666,6 +1690,22 @@ def upload_tier_plan_from_bucket_mb(bucket, mb):
                 upload_audio_low_confidence_max_attempts,
                 upload_low_confidence_read_cap,
             )
+    elif bucket == "image":
+        if upload_image_max_link_only_mb > 0 and mb >= upload_image_max_link_only_mb:
+            return (
+                True,
+                f"image_mb={mb:.1f}>={upload_image_max_link_only_mb} (UPLOAD_IMAGE_MAX_LINK_ONLY_MB)",
+                None,
+                None,
+            )
+    elif bucket == "other":
+        if upload_other_max_link_only_mb > 0 and mb >= upload_other_max_link_only_mb:
+            return (
+                True,
+                f"other_mb={mb:.1f}>={upload_other_max_link_only_mb} (UPLOAD_OTHER_MAX_LINK_ONLY_MB)",
+                None,
+                None,
+            )
     return False, "", None, None
 
 
@@ -1683,16 +1723,29 @@ def compute_upload_tier_plan(file_path):
 
 
 def send_telegram_link_fallback(
-    bale_chat_id, message, caption, caption_parse_mode, source_key, reply_bale, bucket=None, src_mb=None
+    bale_chat_id,
+    message,
+    caption,
+    caption_parse_mode,
+    source_key,
+    reply_bale,
+    bucket=None,
+    src_mb=None,
+    force=False,
 ):
     """Third tier: text post on Bale with link to the original Telegram message."""
-    if not telegram_link_fallback_allowed(bucket, src_mb):
+    if not force and not telegram_link_fallback_allowed(bucket, src_mb):
         print(
             f"[BaleUpload] Telegram link fallback disabled for bucket={bucket!r} "
             f"(allowed buckets: {sorted(BALE_FALLBACK_TELEGRAM_LINK_BUCKETS)})",
             flush=True,
         )
         return None
+    if force:
+        print(
+            f"[BaleUpload] confidence gate: forcing Telegram link fallback for bucket={bucket!r}",
+            flush=True,
+        )
     tg_link = telegram_message_link(message, source_key)
     text = build_telegram_link_fallback_text(caption, tg_link)
     mid = send_text_to_bale(bale_chat_id, text, caption_parse_mode, reply_bale)
@@ -1736,6 +1789,28 @@ def upload_media_to_bale_with_tiers(
             reply_bale,
             bucket=bucket,
             src_mb=src_mb_hint,
+            force=True,
+        )
+
+    def _fallback_on_413(stage):
+        if bucket not in ("video", "image", "other"):
+            return None
+        if not _media_upload_failed_with_413():
+            return None
+        print(
+            f"[BaleUpload] {stage}: Bale returned 413 (Request Entity Too Large) -> Telegram link",
+            flush=True,
+        )
+        return send_telegram_link_fallback(
+            bale_chat_id,
+            message,
+            caption,
+            caption_parse_mode,
+            source_key,
+            reply_bale,
+            bucket=bucket,
+            src_mb=src_mb_hint,
+            force=True,
         )
 
     def _read_for(path):
@@ -1829,6 +1904,10 @@ def upload_media_to_bale_with_tiers(
     if mid is not None:
         safe_remove(extra_delete)
         return mid
+    fallback_mid = _fallback_on_413("direct upload")
+    if fallback_mid is not None:
+        safe_remove(extra_delete)
+        return fallback_mid
 
     if not preprocessed:
         compressed_path, extra_delete = compress_media_for_bale_retry(file_path)
@@ -1848,6 +1927,9 @@ def upload_media_to_bale_with_tiers(
                 )
                 if mid is not None:
                     return mid
+                fallback_mid = _fallback_on_413("post-compress upload")
+                if fallback_mid is not None:
+                    return fallback_mid
             finally:
                 safe_remove(extra_delete)
     else:
@@ -2801,6 +2883,58 @@ def _album_all_documents(parts):
     return True
 
 
+def _message_file_size_mb(msg):
+    f = getattr(msg, "file", None)
+    size = getattr(f, "size", None)
+    if size is None:
+        return None
+    try:
+        b = int(size)
+    except (TypeError, ValueError):
+        return None
+    if b <= 0:
+        return None
+    return b / (1024.0 * 1024.0)
+
+
+def _album_can_use_media_group(parts, media_kind):
+    """
+    For large albums, avoid one huge multipart sendMediaGroup and use per-part tiered upload.
+    This mirrors audio reliability strategy (preempt brittle paths), without splitting.
+    """
+    if len(parts) <= 1:
+        return False
+    if media_kind == "photo":
+        max_total = bale_photo_album_media_group_max_total_mb
+    elif media_kind == "document":
+        max_total = bale_document_album_media_group_max_total_mb
+    else:
+        return False
+
+    sizes = [_message_file_size_mb(p) for p in parts]
+    known = [s for s in sizes if s is not None]
+    if not known:
+        return True
+    total_mb = sum(known)
+    if total_mb > max_total:
+        print(
+            f"[Album][MediaGroup] skip kind={media_kind}: estimated total {total_mb:.2f}MB > "
+            f"{max_total:.2f}MB; using per-part upload",
+            flush=True,
+        )
+        return False
+    if media_kind == "document":
+        max_file = max(known)
+        if max_file > bale_document_album_media_group_max_file_mb:
+            print(
+                f"[Album][MediaGroup] skip kind=document: largest file {max_file:.2f}MB > "
+                f"{bale_document_album_media_group_max_file_mb:.2f}MB; using per-part upload",
+                flush=True,
+            )
+            return False
+    return True
+
+
 async def _forward_homogeneous_media_group_album(parts, bale_chat_id, source_key, media_kind):
     """
     Send a Telegram album of only photos or only documents to Bale as sendMediaGroup.
@@ -2960,6 +3094,7 @@ async def forward_album_parts_to_bale(parts, bale_chat_id, source_key=None):
         bale_photo_album_media_group
         and len(parts) > 1
         and all(getattr(p, "photo", None) for p in parts)
+        and _album_can_use_media_group(parts, "photo")
     ):
         try:
             return await _forward_homogeneous_media_group_album(parts, bale_chat_id, source_key, "photo")
@@ -2969,6 +3104,7 @@ async def forward_album_parts_to_bale(parts, bale_chat_id, source_key=None):
         bale_document_album_media_group
         and len(parts) > 1
         and _album_all_documents(parts)
+        and _album_can_use_media_group(parts, "document")
     ):
         try:
             return await _forward_homogeneous_media_group_album(parts, bale_chat_id, source_key, "document")
@@ -3068,6 +3204,26 @@ def _bale_error_body_snippet(response_text, limit=450):
     return response_text.replace("\n", " ").strip()[:limit]
 
 
+_last_media_upload_failure_code = None
+
+
+def _media_upload_fail_reset():
+    global _last_media_upload_failure_code
+    _last_media_upload_failure_code = None
+
+
+def _media_upload_fail_mark(status_code):
+    global _last_media_upload_failure_code
+    try:
+        _last_media_upload_failure_code = int(status_code)
+    except (TypeError, ValueError):
+        return
+
+
+def _media_upload_failed_with_413():
+    return _last_media_upload_failure_code == 413
+
+
 def _post_bale_file(
     bale_chat_id,
     endpoint,
@@ -3124,6 +3280,7 @@ def _try_upload_endpoint(
     """POST one Bale multipart upload until success or attempts exhausted. Backoff on HTTP 5xx."""
     n = max_attempts if max_attempts is not None else bale_media_upload_attempts
     n = max(1, n)
+    _media_upload_fail_reset()
     for attempt in range(n):
         try:
             code, body = _post_bale_file(
@@ -3144,12 +3301,14 @@ def _try_upload_endpoint(
                         f"via={endpoint} bale_msg_id={mid}",
                         flush=True,
                     )
+                _media_upload_fail_reset()
                 print(f"[OK][File] chat={bale_chat_id} via={endpoint} file={file_path} bale_msg_id={mid}")
                 return mid
             if code is None:
                 if attempt + 1 < n:
                     time.sleep(bale_retry_sleep(attempt))
                 continue
+            _media_upload_fail_mark(code)
             snippet = _bale_error_body_snippet(body)
             print(
                 f"[ERR][File] {label} attempt={attempt + 1}/{n} "
@@ -3219,6 +3378,7 @@ def send_media_to_bale(
     - Images: try sendDocument before sendPhoto when SEND_IMAGE_AS_DOCUMENT_FIRST=1 (often more stable).
     Returns Bale result.message_id on success, or None on failure.
     """
+    _media_upload_fail_reset()
     read_timeout = read_timeout if read_timeout is not None else upload_timeout_seconds
     if read_timeout_cap is not None:
         read_timeout = min(read_timeout, read_timeout_cap)
@@ -3237,6 +3397,19 @@ def send_media_to_bale(
         print(f"[BaleUpload] start chat={bale_chat_id} file={file_path!r} ext={ext}", flush=True)
 
     if ext in image_exts:
+        image_document_only = False
+        if upload_image_document_only_mb > 0:
+            try:
+                image_document_only = file_size_mb(file_path) >= upload_image_document_only_mb
+            except OSError:
+                image_document_only = False
+        if image_document_only:
+            print(
+                f"[BaleUpload] image >= {upload_image_document_only_mb:.1f}MB: "
+                "skip sendPhoto, use sendDocument only",
+                flush=True,
+            )
+            return _upload_with_caption_variants("sendDocument", "document", "image_as_document")
         strategies = (
             [("sendDocument", "document"), ("sendPhoto", "photo")]
             if send_image_as_document_first
@@ -3427,7 +3600,7 @@ async def forward_message_to_bale(message, bale_chat_id, source_key=None, includ
         bucket_hint = upload_media_bucket_from_message(msg_kind, ext)
         if upload_confidence_enabled and mb_hint is not None and bucket_hint:
             link_only_hint, hint_reason, _, _ = upload_tier_plan_from_bucket_mb(bucket_hint, mb_hint)
-            if link_only_hint and telegram_link_fallback_allowed(bucket_hint, mb_hint):
+            if link_only_hint:
                 print(
                     f"[BaleUpload] confidence (metadata mb={mb_hint:.2f}): skip Telegram download "
                     f"-> link ({hint_reason})",
@@ -3442,6 +3615,9 @@ async def forward_message_to_bale(message, bale_chat_id, source_key=None, includ
                         caption_parse_mode,
                         source_key,
                         reply_bale,
+                        bucket_hint,
+                        mb_hint,
+                        True,
                     ),
                     timeout=120,
                 )
