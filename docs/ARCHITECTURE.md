@@ -18,7 +18,7 @@ flowchart LR
 
 | Mode | Flow |
 |------|------|
-| `daemon` | `run_crawl` (optional) → `run_send` loop → `run_live_watch` |
+| `daemon` | `run_crawl` (startup by default) → `run_send` loop → `run_live_watch` |
 | `crawl` | Fill `queue` from Telegram history |
 | `send` | Drain `pending` / `failed` rows |
 
@@ -30,10 +30,19 @@ flowchart LR
 
 ## Media pipeline
 
-1. Optional compress-before-upload
-2. Bale multipart upload (retries on 5xx)
-3. ffmpeg re-encode retry
-4. Caption + `t.me/...` link fallback
+1. Confidence tier from metadata (size/bucket): may skip to Telegram-link fallback
+2. Optional compress-before-upload
+3. Bale multipart upload (retry/backoff on transient errors)
+4. ffmpeg re-encode retry
+5. Oversized homogeneous albums skip `sendMediaGroup` and send per-part
+6. Non-audio 413 (`Request Entity Too Large`) forces immediate Telegram-link fallback
+
+## Startup behavior (important)
+
+- On daemon restart, startup crawl re-scans Telegram history by default.
+- Queue upsert is idempotent; already-sent rows are skipped during send.
+- This catches new messages posted while bot was not running.
+- Set `DAEMON_SKIP_CRAWL_IF_QUEUED=1` to disable this behavior.
 
 ## Profiles
 

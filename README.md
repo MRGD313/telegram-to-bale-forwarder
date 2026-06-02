@@ -7,6 +7,7 @@ Supports:
 - **Public channel** → one Bale channel (full history + live)
 - **Private forum group** → different Bale channel per topic (mapped topics only)
 - **SQLite queue** — resume after restarts without re-sending
+- **Re-crawl on restart (default)** — discover newly arrived messages, skip already-forwarded rows
 - **Strict order** — message *N+1* is not sent until *N* succeeds
 - **Auto-reconnect** — Telegram disconnects are retried (daemon supervisor)
 
@@ -19,12 +20,13 @@ Uses [Telethon](https://github.com/LonamiWebs/Telethon) (user account) + [Bale B
 | Area | Behavior |
 |------|----------|
 | Text | Plain / HTML / markdown options; optional Telegram deep-link fallback |
-| Photos | Albums → Bale `sendMediaGroup`; single images as document or photo |
+| Photos | Albums use Bale `sendMediaGroup` when small; oversized albums fall back to per-part send |
+| Documents | Oversized document albums skip `sendMediaGroup`; per-part send + 413-aware link fallback |
 | Voice / audio | Opus re-encode ladder; compress-before-upload on slow links |
-| Video | H.264 resize + CRF; tiered upload → compress → link fallback |
+| Video | H.264 resize + CRF; confidence tiers: upload → compress → Telegram link |
 | Forum topics | `TOPIC_TO_BALE_MAPPING` per topic; unlisted topics skipped |
 | Order | `STRICT_SEND_ORDER=1`; auto-retry same message on failure |
-| Daemon | Crawl history → send queue → listen for new Telegram posts |
+| Daemon | Startup crawl (default) → send queue → live listener for new posts |
 
 ---
 
@@ -161,7 +163,7 @@ Run:
 
 | `MODE` | Description |
 |--------|-------------|
-| `daemon` | **Recommended.** Optional crawl + send queue + live listener |
+| `daemon` | **Recommended.** Startup crawl + send queue + live listener |
 | `crawl` | Only enqueue messages into SQLite |
 | `send` | Only drain the queue |
 | `crawl_then_send` | One-shot crawl then send (no live) |
@@ -195,12 +197,24 @@ Only one forwarder process at a time (shared `session` file).
 
 Defaults favor smaller uploads (e.g. Iran → Bale):
 
-1. Optional **compress before upload** (`COMPRESS_SMALL_FIRST=1`)
-2. Upload to Bale (retries + backoff on 5xx)
-3. On failure → **ffmpeg** compress and retry
-4. On failure → text + **t.me** link (`BALE_FALLBACK_TELEGRAM_LINK=1`)
+1. **Confidence gate (metadata)** may skip download/upload and post Telegram link directly for low-probability cases (size-based).
+2. Optional **compress before upload** (`COMPRESS_SMALL_FIRST=1`).
+3. Upload to Bale (retries + backoff on transient errors).
+4. On failure → **ffmpeg** compress and retry (bucket-specific).
+5. For large/fragile albums: skip single huge `sendMediaGroup` and send parts individually.
+6. On unrecoverable/low-confidence paths (including HTTP 413 for non-audio buckets) → text + **t.me** link.
 
 Tune via `.env.example` (bitrates, CRF, size thresholds).
+
+### Startup backfill behavior
+
+By default, daemon startup re-scans Telegram history and updates queue rows:
+
+- already-forwarded messages are skipped,
+- unsent messages are (re)queued and forwarded in strict order,
+- live listener then continues with new incoming messages.
+
+Use `DAEMON_SKIP_CRAWL_IF_QUEUED=1` only if you intentionally want to skip startup crawl when queue already has rows.
 
 ---
 
