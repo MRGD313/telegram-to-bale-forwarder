@@ -622,7 +622,8 @@ send_auto_retry_on_failure = os.getenv("SEND_AUTO_RETRY_ON_FAILURE", "1").strip(
 send_retry_delay_seconds = float(os.getenv("SEND_RETRY_DELAY_SECONDS", "90"))
 # MODE=daemon: run full crawl once on startup before first send (BACKFILL_LIMIT=0 = all history).
 daemon_initial_crawl = os.getenv("DAEMON_INITIAL_CRAWL", "1").strip().lower() in ("1", "true", "yes")
-daemon_skip_crawl_if_queued = os.getenv("DAEMON_SKIP_CRAWL_IF_QUEUED", "1").strip().lower() in (
+# Default is OFF: every fresh daemon start re-crawls Telegram and only unsent rows are forwarded.
+daemon_skip_crawl_if_queued = os.getenv("DAEMON_SKIP_CRAWL_IF_QUEUED", "0").strip().lower() in (
     "1",
     "true",
     "yes",
@@ -4141,6 +4142,12 @@ async def run_daemon():
             print(f"[Daemon] Skip initial crawl — queue already has {qn} row(s).", flush=True)
             _daemon_crawl_done = True
         else:
+            if qn > 0:
+                print(
+                    f"[Daemon] Initial crawl enabled with existing queue rows={qn}; "
+                    "rescanning Telegram and keeping already-sent rows skipped.",
+                    flush=True,
+                )
             while True:
                 try:
                     await run_crawl()
