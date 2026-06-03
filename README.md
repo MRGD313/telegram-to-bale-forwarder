@@ -120,6 +120,8 @@ Run:
 ```powershell
 # Windows
 .\run_public.ps1
+# Auto-restart wrapper (recommended for unstable links):
+.\run_public_watchdog.ps1
 
 # Linux / manual
 DOTENV_FILE=.env.public python main.py
@@ -155,6 +157,8 @@ Run:
 
 ```powershell
 .\run_private.ps1
+# Auto-restart wrapper:
+.\run_private_watchdog.ps1
 ```
 
 ---
@@ -177,10 +181,11 @@ Run **public** and **private** with separate env files and databases:
 
 | Profile | Env file | DB | Launch |
 |---------|----------|-----|--------|
-| Public | `.env.public` | `state.db` | `run_public.ps1` |
-| Private forum | `.env.private` | `state_private.db` | `run_private.ps1` |
+| Public | `.env.public` | `state.db` | `run_public.ps1` / `run_public_watchdog.ps1` |
+| Private forum | `.env.private` | `state_private.db` | `run_private.ps1` / `run_private_watchdog.ps1` |
 
 Only one forwarder process at a time (shared `session` file).
+Launchers block duplicate instances by default. Set `FORCE_NEW_FORWARDER=1` only when you intentionally need a bypass.
 
 ---
 
@@ -236,6 +241,8 @@ On disconnect, the daemon reconnects and continues (no manual restart):
 ├── setup.py                # Interactive .env wizard
 ├── run_public.ps1          # Public profile (Windows)
 ├── run_private.ps1         # Private profile (Windows)
+├── run_public_watchdog.ps1 # Public profile with auto-restart loop
+├── run_private_watchdog.ps1# Private profile with auto-restart loop
 ├── .env.example            # All options documented
 ├── .env.public.example
 ├── .env.private.example
