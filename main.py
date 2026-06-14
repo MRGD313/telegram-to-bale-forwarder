@@ -184,6 +184,48 @@ def _probe_telethon_connect(proxy_url):
         asyncio.set_event_loop(asyncio.new_event_loop())
 
 
+def _probe_telethon_direct_connect():
+    """Real MTProto direct-connect test (no proxy)."""
+    try:
+        api_id = int(os.getenv("API_ID"))
+        api_hash = os.getenv("API_HASH")
+    except (TypeError, ValueError):
+        return False
+    if not api_hash:
+        return False
+    from telethon.sessions import MemorySession
+
+    test = TelegramClient(
+        MemorySession(),
+        api_id,
+        api_hash,
+        proxy=None,
+        connection_retries=3,
+        timeout=45,
+    )
+    loop = asyncio.new_event_loop()
+    try:
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(asyncio.wait_for(test.connect(), timeout=25))
+        return test.is_connected()
+    except Exception as exc:
+        print(f"[Network] direct MTProto probe failed: {exc!r}", flush=True)
+        return False
+    finally:
+        try:
+            if test.is_connected():
+                loop.run_until_complete(test.disconnect())
+        except Exception:
+            pass
+        try:
+            loop.close()
+        except Exception:
+            pass
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
 def _apply_process_http_proxy(http_url):
     http_url = _normalize_proxy_url(http_url)
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
@@ -198,6 +240,12 @@ def _apply_process_http_proxy(http_url):
     merged = ",".join(parts)
     os.environ["NO_PROXY"] = merged
     os.environ["no_proxy"] = merged
+
+
+def _clear_process_http_proxy():
+    """Remove inherited process proxy vars when direct route is selected."""
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        os.environ.pop(key, None)
 
 
 def _proxy_scheme_variants(proxy_url):
@@ -366,8 +414,20 @@ def detect_outbound_network():
     mode = _network_mode_from_env()
 
     if mode == "direct":
+        _clear_process_http_proxy()
         print("[Network] direct routing (forced).", flush=True)
         return None
+
+    if mode == "auto":
+        # Prefer direct route when available (e.g. SoftEther LAN/TUN), even if stale proxy settings exist.
+        if _probe_direct_telegram():
+            _clear_process_http_proxy()
+            print("[Network] auto: direct Telegram OK (TUN/VPN or open route).", flush=True)
+            return None
+        if _probe_telethon_direct_connect():
+            _clear_process_http_proxy()
+            print("[Network] auto: direct MTProto connect OK (using direct route).", flush=True)
+            return None
 
     explicit = _explicit_proxy_candidates()
     if explicit:
@@ -376,10 +436,6 @@ def detect_outbound_network():
             print("[Network] using proxy from environment.", flush=True)
             return found
         print("[Network] configured proxy unreachable; continuing auto-detect…", flush=True)
-
-    if mode == "auto" and _probe_direct_telegram():
-        print("[Network] auto: direct Telegram OK (TUN/VPN or open route).", flush=True)
-        return None
 
     candidates = []
     sys_proxy = _windows_system_proxy_url()
@@ -471,6 +527,9 @@ upload_audio_sec_per_mb = float(os.getenv("UPLOAD_AUDIO_SEC_PER_MB", "90"))
 upload_audio_read_max_seconds = float(os.getenv("UPLOAD_AUDIO_READ_MAX_SECONDS", "1200"))
 # 0 = never metadata link-only for audio; large voices still download+compress+upload.
 upload_audio_max_link_only_mb = float(os.getenv("UPLOAD_AUDIO_MAX_LINK_ONLY_MB", "0"))
+# Global hard gate: if source media is above this size, skip upload pipeline and use Telegram link.
+# Set 0 to disable.
+upload_link_only_above_mb = float(os.getenv("UPLOAD_LINK_ONLY_ABOVE_MB", "60"))
 # For huge non-video files, skip brittle upload chain and post Telegram link directly.
 upload_image_max_link_only_mb = float(os.getenv("UPLOAD_IMAGE_MAX_LINK_ONLY_MB", "20"))
 upload_other_max_link_only_mb = float(os.getenv("UPLOAD_OTHER_MAX_LINK_ONLY_MB", "35"))
@@ -599,6 +658,8 @@ if bale_text_format not in ("plain_links", "html", "markdown", "rich"):
 bale_plain_link_append = os.getenv("BALE_PLAIN_LINK_APPEND", "inline").strip().lower()
 if bale_plain_link_append not in ("inline", "newline", "footer"):
     bale_plain_link_append = "inline"
+# Safe upper bound for Bale text chunking when server returns "message is too long".
+bale_text_chunk_chars = max(400, int(os.getenv("BALE_TEXT_CHUNK_CHARS", "3500")))
 # If true, plain_links inline mode inserts U+200E before " (url)" so RTL captions flow correctly;
 # the mark is NOT placed before "https" inside the URL (Bale Web fails to autolink that pattern).
 bale_link_ltr_mark = os.getenv("BALE_LINK_LTR_MARK", "1").strip().lower() in ("1", "true", "yes")
@@ -1644,6 +1705,13 @@ def upload_tier_plan_from_bucket_mb(bucket, mb):
     """Same return shape as compute_upload_tier_plan; mb must be > 0."""
     if not upload_confidence_enabled or bucket is None:
         return False, "", None, None
+    if upload_link_only_above_mb > 0 and mb >= upload_link_only_above_mb:
+        return (
+            True,
+            f"source_mb={mb:.1f}>={upload_link_only_above_mb} (UPLOAD_LINK_ONLY_ABOVE_MB)",
+            None,
+            None,
+        )
     if bucket == "video":
         est_mb = mb * video_post_compress_estimate_ratio
         est_read_sec = est_mb * video_upload_sec_per_mb
@@ -1794,7 +1862,9 @@ def upload_media_to_bale_with_tiers(
         )
 
     def _fallback_on_413(stage):
-        if bucket not in ("video", "image", "other"):
+        # Force Telegram-link fallback only for this specific message when Bale says 413.
+        # This does NOT enable link fallback globally for the whole audio bucket.
+        if bucket not in ("video", "image", "other", "audio"):
             return None
         if not _media_upload_failed_with_413():
             return None
@@ -3159,6 +3229,31 @@ async def resolve_source_for_telethon(source):
 
 def send_text_to_bale(bale_chat_id, text, parse_mode=None, reply_to_message_id=None):
     text = text if text is not None else ""
+
+    def _is_message_too_long(status_code, body_text):
+        return int(status_code or 0) == 400 and "message is too long" in str(body_text or "").lower()
+
+    def _split_text_for_bale(raw_text, limit):
+        if len(raw_text) <= limit:
+            return [raw_text]
+        chunks = []
+        rest = raw_text
+        while len(rest) > limit:
+            cut = rest.rfind("\n", 0, limit + 1)
+            if cut < int(limit * 0.6):
+                cut = rest.rfind(" ", 0, limit + 1)
+            if cut < int(limit * 0.6):
+                cut = limit
+            part = rest[:cut].rstrip()
+            if not part:
+                part = rest[:limit]
+                cut = limit
+            chunks.append(part)
+            rest = rest[cut:].lstrip()
+        if rest:
+            chunks.append(rest)
+        return chunks
+
     payload = {"chat_id": bale_chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
@@ -3182,6 +3277,36 @@ def send_text_to_bale(bale_chat_id, text, parse_mode=None, reply_to_message_id=N
                     )
                 print(f"[OK][Text] chat={bale_chat_id} text={preview!r} bale_msg_id={mid}")
                 return mid
+            if _is_message_too_long(r.status_code, r.text):
+                chunks = _split_text_for_bale(text, bale_text_chunk_chars)
+                if len(chunks) <= 1:
+                    print(
+                        f"[ERR][Text] Bale says message too long but split produced 1 chunk "
+                        f"(len={len(text)}).",
+                        flush=True,
+                    )
+                    return None
+                print(
+                    f"[Text] message too long -> split into {len(chunks)} chunks "
+                    f"(max {bale_text_chunk_chars} chars)",
+                    flush=True,
+                )
+                first_mid = None
+                reply_to = reply_to_message_id
+                for chunk in chunks:
+                    chunk_mid = send_text_to_bale(
+                        bale_chat_id,
+                        chunk,
+                        parse_mode=parse_mode,
+                        reply_to_message_id=reply_to,
+                    )
+                    if chunk_mid is None:
+                        return None
+                    if first_mid is None:
+                        first_mid = chunk_mid
+                    reply_to = chunk_mid
+                    time.sleep(per_message_delay_seconds)
+                return first_mid
             snippet = _bale_error_body_snippet(r.text)
             print(
                 f"[ERR][Text] attempt={attempt + 1}/{bale_media_upload_attempts} "
