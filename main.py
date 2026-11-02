@@ -1095,11 +1095,22 @@ def bale_row_already_forwarded(bale_chat_id, tg_chat_id, tg_message_id):
 
 
 def bale_connect_timeout(file_path=None):
-    """TCP connect timeout for Bale multipart uploads (scales slightly with file size)."""
-    base = 30.0
+    """
+    Socket timeout for Bale multipart uploads (connect + streaming the request body).
+
+    `requests` applies this value to socket writes too, so it must cover the whole
+    upload on slow domestic uplinks (~100 KB/s here). Scale with file size instead
+    of the old 3 s/MB cap, which cut off anything above ~4 MB mid-upload.
+    """
+    try:
+        base = float(os.getenv("BALE_CONNECT_TIMEOUT_SECONDS", "30"))
+    except ValueError:
+        base = 30.0
+    base = max(30.0, base)
     if file_path:
         try:
-            base = max(base, 20.0 + min(90.0, file_size_mb(file_path) * 3.0))
+            # ~12 s per MB covers slow links; cap keeps a hung socket bounded.
+            base = max(base, 20.0 + min(1800.0, file_size_mb(file_path) * 12.0))
         except OSError:
             pass
     return base
