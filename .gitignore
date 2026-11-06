@@ -12,6 +12,8 @@ session*
 *.db-shm
 *.db-wal
 *.db.backup_*
+# Exception: GitHub Actions daily mode persists this queue DB in the repo.
+!state/state.db
 
 # Media and tools
 temp/

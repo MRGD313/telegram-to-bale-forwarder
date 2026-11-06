@@ -1,0 +1,146 @@
+name: Daily forward (Telegram → Bale)
+
+# Free, serverless daily catch-up: no 24/7 process.
+#
+# Forks: this job stays skipped until you set repository variable
+#   ENABLE_DAILY_FORWARD = true
+# See docs/GITHUB_ACTIONS.md for the full setup (secrets, variables, session string).
+#
+# The cron below is UTC. 13:37 UTC = 17:07 Iran (UTC+3:30).
+on:
+  schedule:
+    - cron: "37 13 * * *"
+  workflow_dispatch:
+    inputs:
+      min_tg_message_id:
+        description: "Optional: override MIN_TG_MESSAGE_ID for this manual run"
+        required: false
+        type: string
+
+concurrency:
+  group: daily-forward
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  forward:
+    # Opt-in guard so forks don't run (and don't fail) before configuration.
+    if: vars.ENABLE_DAILY_FORWARD == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      MODE: crawl_then_send
+      BACKFILL_LIMIT: "0"
+      DB_PATH: ${{ vars.DB_PATH || 'state/state.db' }}
+      SOURCE_TO_BALE_MAPPING: ${{ vars.SOURCE_TO_BALE_MAPPING }}
+      MIN_TG_MESSAGE_ID: ${{ github.event.inputs.min_tg_message_id || vars.MIN_TG_MESSAGE_ID || '0' }}
+      TOPIC_TO_BALE_MAPPING: ${{ vars.TOPIC_TO_BALE_MAPPING }}
+      STRICT_TOPIC_ROUTING_SOURCES: ${{ vars.STRICT_TOPIC_ROUTING_SOURCES }}
+      INCLUDE_SEND_TOPIC_IDS: ${{ vars.INCLUDE_SEND_TOPIC_IDS }}
+      EXCLUDE_SEND_TOPIC_IDS: ${{ vars.EXCLUDE_SEND_TOPIC_IDS }}
+      EXCLUDE_SEND_NULL_TOPIC: ${{ vars.EXCLUDE_SEND_NULL_TOPIC || '0' }}
+      FORCE_BALE_CHAT: ${{ vars.FORCE_BALE_CHAT }}
+      SEND_TOPIC_BY_TOPIC: "0"
+      STRICT_SEND_ORDER: "1"
+      RESET_SENT_ON_SEND_START: "0"
+      SEND_AUTO_RETRY_ON_FAILURE: "1"
+      SEND_RETRY_DELAY_SECONDS: "30"
+      MAX_RETRIES: "3"
+      # A daily job should exit and retry next day, not hold forever on outages.
+      SEND_NETWORK_RETRY_UNLIMITED: "0"
+      NETWORK_RETRY_BASE_SECONDS: "30"
+      NETWORK_RETRY_MAX_SECONDS: "180"
+      PER_MESSAGE_DELAY_SECONDS: "1"
+      DOWNLOAD_TIMEOUT_SECONDS: "600"
+      UPLOAD_TIMEOUT_SECONDS: "300"
+      UPLOAD_SEC_PER_MB: "180"
+      MAX_UPLOAD_TIMEOUT_SECONDS: "7200"
+      BALE_FALLBACK_TELEGRAM_LINK: "1"
+      BALE_TEXT_FORMAT: plain_links
+      SEND_IMAGE_AS_DOCUMENT_FIRST: "1"
+      AUDIO_REENCODE_ENABLE: "1"
+      MEDIA_REENCODE_ON_FAIL: "1"
+      COMPRESS_SMALL_FIRST: "1"
+      TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+      BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+      TELEGRAM_PHONE: ${{ vars.TELEGRAM_PHONE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Resolve ffmpeg
+        run: |
+          if command -v ffmpeg >/dev/null 2>&1; then
+            echo "FFMPEG_PATH=$(command -v ffmpeg)" >> "$GITHUB_ENV"
+          else
+            echo "FFMPEG_PATH=$(python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')" >> "$GITHUB_ENV"
+          fi
+
+      - name: Validate configuration
+        run: |
+          missing=0
+          [ -n "$SOURCE_TO_BALE_MAPPING" ] || { echo "::error::Set repository variable SOURCE_TO_BALE_MAPPING (e.g. @source->@bale)"; missing=1; }
+          [ -n "$API_ID" ]              || { echo "::error::Set secret API_ID"; missing=1; }
+          [ -n "$API_HASH" ]            || { echo "::error::Set secret API_HASH"; missing=1; }
+          [ -n "$BALE_BOT_TOKEN" ]      || { echo "::error::Set secret BALE_BOT_TOKEN"; missing=1; }
+          [ -n "$TELEGRAM_SESSION" ]    || { echo "::error::Set secret TELEGRAM_SESSION (see docs/GITHUB_ACTIONS.md)"; missing=1; }
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Forward new messages
+        run: python main.py
+
+      - name: Checkpoint SQLite state
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, sqlite3
+          p = os.environ.get("DB_PATH", "state/state.db")
+          if os.path.exists(p):
+              conn = sqlite3.connect(p)
+              conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+              conn.close()
+          PY
+
+      - name: Persist state (and monthly heartbeat)
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p state
+          # Monthly heartbeat keeps the repository active so GitHub does not
+          # disable this scheduled workflow after 60 days without commits.
+          if [ "$(date -u +%d)" = "01" ]; then
+            date -u +%Y-%m-%dT%H:%M:%SZ > state/heartbeat.txt
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A state
+          if [ -n "$DB_PATH" ] && [ -e "$DB_PATH" ]; then
+            git add -f "$DB_PATH"
+          fi
+
+          if git diff --cached --quiet; then
+            echo "No state changes."
+          else
+            git commit -m "chore: update forwarder state [skip ci]"
+            git push
+          fi

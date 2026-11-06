@@ -1,6 +1,6 @@
 from telethon import TelegramClient, events
 from telethon import functions
-from telethon.sessions import SQLiteSession
+from telethon.sessions import SQLiteSession, StringSession
 from telethon.extensions import html as tg_html
 from telethon.helpers import add_surrogate, del_surrogate, within_surrogate
 from telethon.tl.types import (
@@ -474,6 +474,10 @@ strict_topic_routing_sources_raw = os.getenv("STRICT_TOPIC_ROUTING_SOURCES", "")
 # crawl | send | crawl_then_send | discover_topics | live
 mode = os.getenv("MODE", "daemon").strip().lower()
 backfill_limit = int(os.getenv("BACKFILL_LIMIT", "20"))
+# Ignore Telegram messages with id <= this value (0 = no floor).
+# Useful for scheduled/cron runs: set it to the latest existing message id so the
+# first run forwards only messages published after setup (no full-history replay).
+min_tg_message_id = int(os.getenv("MIN_TG_MESSAGE_ID", "0") or "0")
 per_message_delay_seconds = float(os.getenv("PER_MESSAGE_DELAY_SECONDS", "1.0"))
 download_timeout_seconds = float(os.getenv("DOWNLOAD_TIMEOUT_SECONDS", "180"))
 download_retry_delay_seconds = float(os.getenv("DOWNLOAD_RETRY_DELAY_SECONDS", "30"))
@@ -793,8 +797,15 @@ class ResilientSQLiteSession(SQLiteSession):
 
 _conn_retries = None if telegram_connection_retries <= 0 else telegram_connection_retries
 _session_busy_ms = int(max(5.0, telegram_session_busy_timeout) * 1000)
+# Ephemeral/CI runs (GitHub Actions, cron jobs) can supply a StringSession via env
+# instead of a persistent session file. The string contains the auth key: keep it secret.
+_telegram_session_string = os.getenv("TELEGRAM_SESSION", "").strip()
+if _telegram_session_string:
+    _telegram_session = StringSession(_telegram_session_string)
+else:
+    _telegram_session = ResilientSQLiteSession("session", busy_timeout_ms=_session_busy_ms)
 client = TelegramClient(
-    ResilientSQLiteSession("session", busy_timeout_ms=_session_busy_ms),
+    _telegram_session,
     api_id,
     api_hash,
     proxy=_telethon_proxy,
@@ -2167,6 +2178,9 @@ def db_connect():
 
 
 def db_init():
+    parent = os.path.dirname(os.path.abspath(db_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with db_connect() as conn:
         conn.execute(
             """
@@ -3860,9 +3874,15 @@ async def run_crawl():
         updated = 0
         queued = 0
         target = backfill_limit if backfill_limit > 0 else None
+        crawl_kwargs = {"limit": None, "reverse": True}
+        if min_tg_message_id:
+            # Server-side floor: only fetch messages newer than the configured id.
+            crawl_kwargs["min_id"] = min_tg_message_id
         with db_connect() as conn:
-            async for msg in iter_messages_resilient(resolved_source, limit=None, reverse=True):
+            async for msg in iter_messages_resilient(resolved_source, **crawl_kwargs):
                 scanned += 1
+                if min_tg_message_id and int(msg.id) <= min_tg_message_id:
+                    continue
                 topic_id = get_topic_id(msg)
                 if exclude_send_null_topic and topic_id is None:
                     continue
@@ -4352,9 +4372,20 @@ async def run_discover_topics():
 
 
 async def main():
-    # Provide phone explicitly so first-run can work non-interactively.
-    # If the session is already authorized, Telethon will not prompt.
-    await client.start(phone=telegram_phone)
+    # With a StringSession (CI), no phone is needed: connect and verify authorization.
+    # With a local session, keep the phone so a first run can log in non-interactively.
+    if telegram_phone:
+        await client.start(phone=telegram_phone)
+    else:
+        await client.connect()
+        if not await client.is_user_authorized():
+            print(
+                "[ERR] Telegram session is not authorized and TELEGRAM_PHONE is not set. "
+                "Run the forwarder locally once to log in, or set TELEGRAM_PHONE.",
+                flush=True,
+            )
+            await client.disconnect()
+            return
     if getattr(client.session, "save_entities", None) is not None:
         client.session.save_entities = False
     resolved = []
