@@ -178,13 +178,16 @@ npx wrangler deploy
   `BALE_BOT_TOKEN`, ...) on the runner; the external cron never sees them.
 - Enable failure notifications in the cron service.
 
-## Keeping the GitHub schedule
+## Trigger model in this repository
 
-The workflow currently keeps its own `schedule` as a fallback. With the
-external trigger, that schedule may still fire late; the workflow's
-`concurrency` group and `state/state.db` prevent duplicate sends. If you want
-only the external trigger, remove the `schedule:` block from
-`.github/workflows/daily-forward.yml` after verifying the external cron.
+The workflow is **dispatch-only**: `on: workflow_dispatch` is the only trigger.
+The external cron is the automatic daily trigger; there is no GitHub `schedule`
+block, so runs are not subject to GitHub's best-effort scheduler or its 60-day
+inactivity disable.
+
+If you want a GitHub-side fallback, add a `schedule:` block to the workflow and
+keep this external trigger. The workflow's `concurrency` group and
+`state/state.db` prevent duplicate sends if both fire.
 
 ## Troubleshooting
 

@@ -165,9 +165,10 @@ Run:
 
 ## Free daily mode (GitHub Actions)
 
-No server or 24/7 process is required. A scheduled GitHub Actions workflow runs
-once a day, reads only messages newer than `MIN_TG_MESSAGE_ID`, forwards them to
-Bale, and commits its queue state back to the repository.
+No server or 24/7 process is required. A free external cron triggers a GitHub
+Actions workflow once a day, which reads only messages newer than
+`MIN_TG_MESSAGE_ID`, forwards them to Bale, and commits its queue state back to
+the repository.
 
 - Public repositories: **free** GitHub Actions minutes
 - No webhook and no Telegram bot admin on the source side (uses your user session)

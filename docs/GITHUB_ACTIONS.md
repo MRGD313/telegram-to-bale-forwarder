@@ -8,13 +8,14 @@ The workflow is [`.github/workflows/daily-forward.yml`](../.github/workflows/dai
 
 ## How it works
 
-1. GitHub starts the job on a schedule (default: **13:37 UTC = 17:07 Iran**).
+1. An external cron triggers the job via `workflow_dispatch` (default:
+   **13:30 UTC = 17:00 Iran**). GitHub's built-in `schedule` can be added as a
+   fallback, but it is best-effort and can be delayed by hours.
 2. The job connects to Telegram with a **user session** (Telethon), crawls only
    messages newer than `MIN_TG_MESSAGE_ID`, and forwards them to Bale in order.
 3. The SQLite queue (`state/state.db`) is committed back to your repository so the
    next run resumes without duplicates.
-4. No messages? The run exits in seconds. A monthly heartbeat commit keeps GitHub
-   from disabling the schedule after 60 days of inactivity.
+4. No messages? The run exits in seconds.
 
 Because it uses a user session instead of a bot, it can read the source channel
 without adding a Telegram bot as admin, and it can download media larger than the
@@ -100,12 +101,18 @@ The script prints a ready-to-paste `MIN_TG_MESSAGE_ID=...` line.
 
 ## Step 5 — Adjust the schedule
 
-Edit the cron in `.github/workflows/daily-forward.yml`:
+The workflow in this repository is **dispatch-only**: it is triggered by the
+free external cron described in [EXTERNAL_CRON.md](EXTERNAL_CRON.md), so GitHub's
+best-effort `schedule` is not used.
+
+If you prefer GitHub's built-in scheduler instead (or want it as a fallback),
+add this to `.github/workflows/daily-forward.yml`:
 
 ```yaml
 on:
   schedule:
-    - cron: "37 13 * * *"   # UTC
+    - cron: "30 13 * * *"   # UTC
+  workflow_dispatch:
 ```
 
 Cron is always UTC. Examples:
@@ -117,10 +124,8 @@ Cron is always UTC. Examples:
 | 08:00 | `30 4 * * *` |
 | Every 6 hours | `0 */6 * * *` |
 
-GitHub may start scheduled jobs a few minutes late. For daily catch-up this is
-usually fine; if you need an exact time, use a free external cron instead of
-GitHub's `schedule` event. See
-[EXTERNAL_CRON.md](EXTERNAL_CRON.md) (cron-job.org or Cloudflare Worker).
+For reliable timing, keep using the external cron: GitHub can start scheduled
+jobs hours late.
 
 ## Step 6 — Test manually
 
@@ -141,9 +146,9 @@ Bale. The first successful run creates `state/state.db` and commits it.
   returns them).
 - Blog/media files larger than 50 MB cannot be uploaded to Bale; the forwarder falls
   back to a `https://t.me/...` link when configured.
-- GitHub disables scheduled workflows after **60 days without repository activity**.
-  The workflow writes `state/heartbeat.txt` on the first day of each month to prevent
-  this. If you disable state commits, re-enable the workflow manually.
+- If you use GitHub's built-in `schedule` as a fallback, GitHub disables
+  scheduled workflows after **60 days without repository activity**. External
+  cron triggers (`workflow_dispatch`) are not affected.
 - Private repositories have a monthly Actions minutes quota (2,000 minutes on the
   Free plan); a daily run normally fits easily.
 

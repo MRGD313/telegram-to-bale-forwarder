@@ -2,14 +2,14 @@ name: Daily forward (Telegram → Bale)
 
 # Free, serverless daily catch-up: no 24/7 process.
 #
+# Triggered by a free external cron at 17:00 Iran via workflow_dispatch
+# (GitHub's own `schedule` is best-effort and was delayed by hours).
+# See docs/EXTERNAL_CRON.md for the cron-job.org / Cloudflare setup.
+#
 # Forks: this job stays skipped until you set repository variable
 #   ENABLE_DAILY_FORWARD = true
 # See docs/GITHUB_ACTIONS.md for the full setup (secrets, variables, session string).
-#
-# The cron below is UTC. 13:37 UTC = 17:07 Iran (UTC+3:30).
 on:
-  schedule:
-    - cron: "37 13 * * *"
   workflow_dispatch:
     inputs:
       min_tg_message_id:
@@ -119,16 +119,11 @@ jobs:
               conn.close()
           PY
 
-      - name: Persist state (and monthly heartbeat)
+      - name: Persist state
         if: always()
         shell: bash
         run: |
           mkdir -p state
-          # Monthly heartbeat keeps the repository active so GitHub does not
-          # disable this scheduled workflow after 60 days without commits.
-          if [ "$(date -u +%d)" = "01" ]; then
-            date -u +%Y-%m-%dT%H:%M:%SZ > state/heartbeat.txt
-          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
