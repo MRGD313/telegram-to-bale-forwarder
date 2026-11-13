@@ -118,7 +118,9 @@ Cron is always UTC. Examples:
 | Every 6 hours | `0 */6 * * *` |
 
 GitHub may start scheduled jobs a few minutes late. For daily catch-up this is
-usually fine; if you need an exact time, use a paid scheduler.
+usually fine; if you need an exact time, use a free external cron instead of
+GitHub's `schedule` event. See
+[EXTERNAL_CRON.md](EXTERNAL_CRON.md) (cron-job.org or Cloudflare Worker).
 
 ## Step 6 — Test manually
 
