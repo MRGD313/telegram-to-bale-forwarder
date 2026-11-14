@@ -15,6 +15,25 @@ Uses [Telethon](https://github.com/LonamiWebs/Telethon) (user account) + [Bale B
 
 ---
 
+## Production setup (free, no server)
+
+For a production deployment, use the **dispatch-only GitHub Actions workflow**
+with a free external cron. No VPS, no Render worker, no webhook, and no 24/7
+process.
+
+- End-to-end guide: **[docs/PRODUCTION.md](docs/PRODUCTION.md)**
+- External cron (cron-job.org / Cloudflare): [docs/EXTERNAL_CRON.md](docs/EXTERNAL_CRON.md)
+- GitHub Actions details: [docs/GITHUB_ACTIONS.md](docs/GITHUB_ACTIONS.md)
+
+The workflow triggers via `workflow_dispatch`; the external cron calls it at the
+chosen time. The queue state is committed to `state/state.db` so each run resumes
+without re-sending.
+
+> Forking the repository? Reset the inherited `state/state.db` before your first
+> run; see the production guide.
+
+---
+
 ## Features
 
 | Area | Behavior |

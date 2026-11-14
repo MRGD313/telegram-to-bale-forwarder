@@ -1,5 +1,8 @@
 # Reliable daily triggers with an external cron
 
+> **Production checklist:** see [PRODUCTION.md](PRODUCTION.md) for the full
+> fork → secrets → external cron → verification guide.
+
 GitHub's `schedule` event is **best-effort**: runs can be delayed by hours or
 dropped under load. For a channel that should be checked at a predictable time,
 trigger the workflow from a free external cron instead:

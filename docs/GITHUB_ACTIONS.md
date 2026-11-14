@@ -1,5 +1,8 @@
 # Free daily forwarding with GitHub Actions
 
+> **Production checklist:** see [PRODUCTION.md](PRODUCTION.md) for the full
+> fork → secrets → external cron → verification guide.
+
 Run the forwarder **once a day on GitHub Actions** instead of keeping a server awake.
 This is the cheapest cloud option for low-volume channels: no VPS, no Render worker,
 no webhook, and no Telegram bot admin on the source side.

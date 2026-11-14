@@ -7,6 +7,21 @@
 > ⚠️ **Outdated** — This Persian README is no longer maintained.  
 > Please use the full and up-to-date guide in [README.md](./README.md).
 
+---
+
+## 🚀 راه‌اندازی پروداکشن (رایگان، بدون سرور)
+
+برای اجرای پروداکشن، از workflow گیت‌هاب با تریگر کرون خارجی استفاده کن؛ نه سرور
+۲۴/۷، نه Render، نه webhook.
+
+- راهنمای کامل: **[docs/PRODUCTION.md](docs/PRODUCTION.md)** (انگلیسی)
+- جزئیات کرون خارجی: [docs/EXTERNAL_CRON.md](docs/EXTERNAL_CRON.md)
+- جزئیات GitHub Actions: [docs/GITHUB_ACTIONS.md](docs/GITHUB_ACTIONS.md)
+
+> اگر ریپو را fork می‌کنی، قبل از اولین اجرا `state/state.db` ارث‌رسیده را پاک کن.
+
+---
+
 # 🤖 ربات انتقال محتوا از تلگرام به بله
 
 رباتی تمام‌اتوماتیک با پایتون که پیام‌های دریافتی از کانال‌های مشخص تلگرام (متن، عکس، ویدیو و فایل‌ها) را به کانال پیام رسان بله شما از طریق API ربات بله ارسال می‌کند.
